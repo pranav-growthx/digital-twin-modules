@@ -95,6 +95,20 @@ function sessionFor(threadId) {
   return s;
 }
 
+// ── Message deduplication ───────────────────────────────────────────────────
+// Slack fires both `message` and `app_mention` for @mentions. Without dedup,
+// the bot replies twice to every mention.
+
+const seenMessages = new Set();
+const SEEN_TTL_MS = 60_000;
+
+function isDuplicate(ts) {
+  if (seenMessages.has(ts)) return true;
+  seenMessages.add(ts);
+  setTimeout(() => seenMessages.delete(ts), SEEN_TTL_MS);
+  return false;
+}
+
 // ── Attention gating ────────────────────────────────────────────────────────
 //
 // When two humans are talking in a thread without @mentioning the bot,
@@ -366,8 +380,8 @@ let selfUserId = null;
 
 // 1) @mentions in a channel — always respond
 app.event("app_mention", async ({ event, say, client }) => {
-  // Ignore bots
   if (event.bot_id) return;
+  if (isDuplicate(event.ts)) return;
 
   const threadId = event.thread_ts || event.ts;
   const session = sessionFor(threadId);
@@ -394,9 +408,9 @@ app.event("app_mention", async ({ event, say, client }) => {
 
 // 2) DMs, and thread replies in threads the bot is already part of
 app.event("message", async ({ event, say, client }) => {
-  // Ignore bots (including ourselves), edits, joins, etc.
   if (event.bot_id || event.subtype) return;
   if (event.user && event.user === selfUserId) return;
+  if (isDuplicate(event.ts)) return;
 
   const isDM = event.channel_type === "im";
   const threadId = event.thread_ts || event.ts;
