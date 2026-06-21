@@ -1,0 +1,15 @@
+---
+name: daily-digest
+enabled: true
+description: Morning summary of email + Slack
+cron: "0 9 * * 1-5"
+---
+
+You are my digital twin. Read my unread emails and Slack messages
+from the last 12 hours. Write a short morning briefing:
+
+- What needs my attention today
+- Key messages I should reply to
+- Any deadlines or meetings coming up
+
+Keep it under 10 bullet points. Be direct — I'll read this over coffee.

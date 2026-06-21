@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 
 /**
- * Twin Scheduler — polls data/jobs.json for due jobs, executes them,
- * delivers output via console + macOS notification (+ Slack if configured).
+ * Twin Scheduler — fires due jobs from two sources:
+ *   1. data/jobs.json   — CLI-created one-off and recurring jobs
+ *   2. workflows/*.workflow.md — markdown-defined scheduled workflows
  *
  * Usage:
  *   import { startScheduler } from "./scheduler.js";
  *   startScheduler();            // inside twin main()
  *
  *   node scheduler.js            // standalone
+ *
+ * Delivery: the scheduler calls an onResult callback with the output.
+ * The platform adapter (Slack, terminal) decides where to send it.
+ * Default: console + macOS notification.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { execSync, spawn } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,10 +30,7 @@ const __dirname = dirname(__filename);
 // ---------------------------------------------------------------------------
 
 function matchCronField(field, value, rangeMin, rangeMax) {
-  // field = one segment of the cron expression (e.g. "*/5" or "1,3,5" or "1-5")
-  // value = current time component (0-59 for minutes, etc.)
   return field.split(",").some((part) => {
-    // Handle step values
     const [rangePart, stepStr] = part.split("/");
     const step = stepStr ? parseInt(stepStr, 10) : 1;
 
@@ -39,12 +41,10 @@ function matchCronField(field, value, rangeMin, rangeMax) {
     } else if (rangePart.includes("-")) {
       [start, end] = rangePart.split("-").map(Number);
     } else {
-      // exact number
       start = parseInt(rangePart, 10);
       end = start;
     }
 
-    // If step is set, enumerate and check
     if (step > 1 || rangePart === "*") {
       for (let i = start; i <= end; i += step) {
         if (i === value) return true;
@@ -60,69 +60,144 @@ export function cronMatches(cronExpr, date) {
   if (parts.length !== 5) return false;
 
   const [minF, hourF, domF, monF, dowF] = parts;
-  const minute = date.getMinutes();
-  const hour = date.getHours();
-  const dom = date.getDate();
-  const month = date.getMonth() + 1; // 1-12
-  const dow = date.getDay(); // 0=Sun
-
   return (
-    matchCronField(minF, minute, 0, 59) &&
-    matchCronField(hourF, hour, 0, 23) &&
-    matchCronField(domF, dom, 1, 31) &&
-    matchCronField(monF, month, 1, 12) &&
-    matchCronField(dowF, dow, 0, 6)
+    matchCronField(minF, date.getMinutes(), 0, 59) &&
+    matchCronField(hourF, date.getHours(), 0, 23) &&
+    matchCronField(domF, date.getDate(), 1, 31) &&
+    matchCronField(monF, date.getMonth() + 1, 1, 12) &&
+    matchCronField(dowF, date.getDay(), 0, 6)
   );
 }
 
 // ---------------------------------------------------------------------------
-// Delivery helpers
+// Markdown workflow parser
 // ---------------------------------------------------------------------------
 
-function notify(title, body) {
+/**
+ * Parse a .workflow.md file into a workflow definition.
+ *
+ * Format:
+ *   ---
+ *   name: daily-digest
+ *   enabled: true
+ *   description: Morning summary of email + Slack
+ *   triggers:
+ *     - type: schedule
+ *       cron: "0 9 * * 1-5"
+ *   ---
+ *   (prompt body — sent to claude -p)
+ */
+function parseWorkflowFile(filePath) {
   try {
-    const escapedTitle = title.replace(/"/g, '\\"');
-    const escapedBody = body.replace(/"/g, '\\"');
+    const raw = readFileSync(filePath, "utf-8");
+    const fmMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+    if (!fmMatch) return null;
+
+    const frontmatter = fmMatch[1];
+    const prompt = fmMatch[2].trim();
+
+    const wf = { prompt, _file: filePath, _mtime: statSync(filePath).mtimeMs };
+
+    for (const line of frontmatter.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const colonIdx = trimmed.indexOf(":");
+      if (colonIdx === -1) continue;
+
+      const key = trimmed.slice(0, colonIdx).trim();
+      const value = trimmed.slice(colonIdx + 1).trim();
+
+      if (key === "name") wf.name = value;
+      else if (key === "enabled") wf.enabled = value === "true";
+      else if (key === "description") wf.description = value;
+      else if (key === "cron") wf.cron = value.replace(/^["']|["']$/g, "");
+      else if (key === "type" && value === "command") wf.triggerType = "command";
+      else if (key === "command") wf.command = value;
+    }
+
+    // Also parse YAML-style triggers array (simple single-trigger case)
+    const cronInTrigger = frontmatter.match(/cron:\s*["']?([^"'\n]+)["']?/);
+    if (cronInTrigger && !wf.cron) {
+      wf.cron = cronInTrigger[1].trim();
+    }
+
+    if (!wf.name) wf.name = basename(filePath, ".workflow.md");
+    if (wf.enabled === undefined) wf.enabled = true;
+
+    return wf;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow registry — scans workflows/ dir, hot-reloads on change
+// ---------------------------------------------------------------------------
+
+/** @type {Map<string, object>} */
+const workflows = new Map();
+let _workflowDir = null;
+
+function scanWorkflows(dir) {
+  if (!existsSync(dir)) return;
+
+  const files = readdirSync(dir).filter((f) => f.endsWith(".workflow.md"));
+
+  // Detect changes
+  const currentFiles = new Set(files.map((f) => join(dir, f)));
+
+  // Remove workflows whose files are gone
+  for (const [name, wf] of workflows) {
+    if (!currentFiles.has(wf._file)) {
+      workflows.delete(name);
+      console.log(`[scheduler] Unloaded workflow: ${name}`);
+    }
+  }
+
+  // Add or update workflows
+  for (const file of files) {
+    const filePath = join(dir, file);
+    const existing = [...workflows.values()].find((w) => w._file === filePath);
+
+    // Skip if file hasn't changed
+    if (existing) {
+      try {
+        const mtime = statSync(filePath).mtimeMs;
+        if (mtime === existing._mtime) continue;
+      } catch {
+        continue;
+      }
+    }
+
+    const wf = parseWorkflowFile(filePath);
+    if (wf && wf.name) {
+      const isReload = workflows.has(wf.name);
+      workflows.set(wf.name, wf);
+      console.log(`[scheduler] ${isReload ? "Reloaded" : "Loaded"} workflow: ${wf.name}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Default delivery — console + macOS notification
+// ---------------------------------------------------------------------------
+
+function defaultOnResult(title, body) {
+  console.log(`\n--- [${title}] ${new Date().toLocaleTimeString()} ---`);
+  console.log(body);
+  console.log("---\n");
+
+  try {
+    const t = title.replace(/"/g, '\\"');
+    const b = body.slice(0, 200).replace(/"/g, '\\"');
     execSync(
-      `osascript -e 'display notification "${escapedBody}" with title "${escapedTitle}"'`,
+      `osascript -e 'display notification "${b}" with title "${t}"'`,
       { timeout: 5000 }
     );
   } catch {
     // macOS notification failed — non-fatal
   }
-}
-
-async function sendSlack(text, channel) {
-  const token = process.env.SLACK_BOT_TOKEN;
-  const ch = channel || process.env.SLACK_CHANNEL;
-  if (!token || !ch) return;
-
-  try {
-    const resp = await fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ channel: ch, text }),
-    });
-    const data = await resp.json();
-    if (!data.ok) {
-      console.error(`[scheduler] Slack error: ${data.error}`);
-    }
-  } catch (err) {
-    console.error(`[scheduler] Slack delivery failed: ${err.message}`);
-  }
-}
-
-async function deliver(title, body, channel) {
-  const label = title || "Twin Scheduler";
-  console.log(`\n--- [${label}] ${new Date().toLocaleTimeString()} ---`);
-  console.log(body);
-  console.log("---\n");
-
-  notify(label, body.slice(0, 200));
-  await sendSlack(`*${label}*\n${body}`, channel);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,64 +206,62 @@ async function deliver(title, body, channel) {
 
 const runningJobs = new Set();
 
-async function executeJob(job, twinDir) {
-  if (runningJobs.has(job.id)) {
-    console.log(`[scheduler] Skipping "${job.title || job.id}" — still running`);
-    return false;
-  }
+function runClaude(prompt, twinDir) {
+  const cwd = twinDir || process.env.TWIN_DIR || __dirname;
+  return new Promise((resolve, reject) => {
+    const proc = spawn("claude", ["-p", prompt], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 120_000,
+    });
 
-  runningJobs.add(job.id);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (stdout += d.toString()));
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+
+    proc.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`claude -p exited ${code}: ${stderr}`));
+    });
+    proc.on("error", (err) => reject(err));
+  });
+}
+
+async function executeJob(job, twinDir, onResult) {
+  const id = job.id || job.name;
+  if (runningJobs.has(id)) return false;
+
+  runningJobs.add(id);
 
   try {
     let output;
-
     if (job.prompt) {
-      // Spawn claude -p in twin directory for persona-aware response
-      const cwd = twinDir || process.env.TWIN_DIR || __dirname;
-      output = await new Promise((resolve, reject) => {
-        const proc = spawn("claude", ["-p", job.prompt], {
-          cwd,
-          stdio: ["ignore", "pipe", "pipe"],
-          timeout: 120_000,
-        });
-
-        let stdout = "";
-        let stderr = "";
-        proc.stdout.on("data", (d) => (stdout += d.toString()));
-        proc.stderr.on("data", (d) => (stderr += d.toString()));
-
-        proc.on("close", (code) => {
-          if (code === 0) resolve(stdout.trim());
-          else reject(new Error(`claude -p exited ${code}: ${stderr}`));
-        });
-
-        proc.on("error", (err) => reject(err));
-      });
+      output = await runClaude(job.prompt, twinDir);
     } else if (job.message) {
       output = job.message;
     } else {
       output = "(no prompt or message configured)";
     }
 
-    await deliver(job.title || job.id, output, job.channel);
+    onResult(job.title || job.name || id, output);
     return true;
   } catch (err) {
-    console.error(`[scheduler] Job "${job.title || job.id}" failed: ${err.message}`);
+    console.error(`[scheduler] Job "${id}" failed: ${err.message}`);
     return false;
   } finally {
-    runningJobs.delete(job.id);
+    runningJobs.delete(id);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Jobs file I/O
+// Jobs file I/O (data/jobs.json)
 // ---------------------------------------------------------------------------
 
 function loadJobs(jobsFile) {
   if (!existsSync(jobsFile)) return [];
   try {
-    const raw = readFileSync(jobsFile, "utf-8");
-    return JSON.parse(raw);
+    return JSON.parse(readFileSync(jobsFile, "utf-8"));
   } catch {
     return [];
   }
@@ -199,12 +272,23 @@ function saveJobs(jobsFile, jobs) {
 }
 
 // ---------------------------------------------------------------------------
+// Minute key for same-minute dedup
+// ---------------------------------------------------------------------------
+
+function minuteKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
 // Poll tick
 // ---------------------------------------------------------------------------
 
-async function tick(jobsFile, twinDir) {
-  const jobs = loadJobs(jobsFile);
+async function tick(jobsFile, twinDir, onResult) {
   const now = new Date();
+  const mk = minuteKey(now);
+
+  // ── 1. JSON jobs ──────────────────────────────────────────────────────────
+  const jobs = loadJobs(jobsFile);
   let dirty = false;
 
   for (const job of jobs) {
@@ -213,45 +297,38 @@ async function tick(jobsFile, twinDir) {
     let due = false;
 
     if (job.runAt) {
-      // One-off job
-      const runAt = new Date(job.runAt);
-      if (now >= runAt) due = true;
+      if (now >= new Date(job.runAt)) due = true;
     } else if (job.cron) {
-      // Recurring job — check if cron matches current minute
-      if (cronMatches(job.cron, now)) {
-        // Prevent re-firing within the same minute
-        if (job.lastRun) {
-          const last = new Date(job.lastRun);
-          if (
-            last.getFullYear() === now.getFullYear() &&
-            last.getMonth() === now.getMonth() &&
-            last.getDate() === now.getDate() &&
-            last.getHours() === now.getHours() &&
-            last.getMinutes() === now.getMinutes()
-          ) {
-            continue; // already fired this minute
-          }
-        }
-        due = true;
-      }
+      if (cronMatches(job.cron, now) && job.lastRun !== mk) due = true;
     }
 
     if (due) {
-      const ok = await executeJob(job, twinDir);
+      const ok = await executeJob(job, twinDir, onResult);
       if (ok) {
-        const isoNow = now.toISOString().slice(0, 19); // local-style, no Z
-        if (job.runAt) {
-          job.status = "done";
-          job.lastRun = isoNow;
-        } else if (job.cron) {
-          job.lastRun = isoNow;
-        }
+        job.lastRun = mk;
+        if (job.runAt) job.status = "done";
         dirty = true;
       }
     }
   }
 
   if (dirty) saveJobs(jobsFile, jobs);
+
+  // ── 2. Markdown workflows ────────────────────────────────────────────────
+  if (_workflowDir) scanWorkflows(_workflowDir);
+
+  for (const [name, wf] of workflows) {
+    if (!wf.enabled || !wf.cron) continue;
+    if (!cronMatches(wf.cron, now)) continue;
+    if (wf._lastRun === mk) continue; // same-minute dedup
+
+    const ok = await executeJob(
+      { name, prompt: wf.prompt, title: wf.description || name },
+      twinDir,
+      onResult
+    );
+    if (ok) wf._lastRun = mk;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +337,18 @@ async function tick(jobsFile, twinDir) {
 
 let _interval = null;
 
+/**
+ * Start the scheduler.
+ *
+ * @param {object} [options]
+ * @param {number} [options.pollMs] - Poll interval in ms (default: 30000)
+ * @param {string} [options.jobsFile] - Path to jobs.json
+ * @param {string} [options.twinDir] - Working directory for claude -p
+ * @param {string} [options.workflowDir] - Path to workflows/ directory
+ * @param {function} [options.onResult] - Callback (title, body) for job output.
+ *   Default: console + macOS notification. The platform adapter (Slack, etc.)
+ *   should pass its own callback to route output to the right place.
+ */
 export function startScheduler(options = {}) {
   if (_interval) {
     console.log("[scheduler] Already running.");
@@ -269,14 +358,20 @@ export function startScheduler(options = {}) {
   const pollMs = options.pollMs || parseInt(process.env.POLL_MS, 10) || 30_000;
   const jobsFile = options.jobsFile || resolve(__dirname, "data", "jobs.json");
   const twinDir = options.twinDir || process.env.TWIN_DIR || null;
+  const onResult = options.onResult || defaultOnResult;
+
+  _workflowDir = options.workflowDir || resolve(__dirname, "workflows");
 
   console.log(`[scheduler] Started — polling every ${pollMs / 1000}s`);
-  console.log(`[scheduler] Jobs file: ${jobsFile}`);
+  console.log(`[scheduler] Jobs: ${jobsFile}`);
+  if (existsSync(_workflowDir)) {
+    console.log(`[scheduler] Workflows: ${_workflowDir}`);
+    scanWorkflows(_workflowDir);
+  }
 
-  // Initial tick
-  tick(jobsFile, twinDir);
+  tick(jobsFile, twinDir, onResult);
 
-  _interval = setInterval(() => tick(jobsFile, twinDir), pollMs);
+  _interval = setInterval(() => tick(jobsFile, twinDir, onResult), pollMs);
   return _interval;
 }
 
@@ -293,16 +388,14 @@ export function stopScheduler() {
 // ---------------------------------------------------------------------------
 
 const isMain =
-  process.argv[1] &&
-  resolve(process.argv[1]) === __filename;
+  process.argv[1] && resolve(process.argv[1]) === __filename;
 
 if (isMain) {
-  // Load .env if present
   try {
     const dotenv = await import("dotenv");
     dotenv.config({ path: resolve(__dirname, ".env") });
   } catch {
-    // dotenv not installed — that's fine
+    // dotenv not installed — fine
   }
 
   startScheduler();
