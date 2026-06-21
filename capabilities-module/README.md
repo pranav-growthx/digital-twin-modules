@@ -88,5 +88,5 @@ Skills are `.claude/skills/<name>/SKILL.md` files that teach the agent **when** 
 | `guide for implementing capabilities.md` | Full technical guide |
 | `GMAIL_CONNECTOR_SETUP.md` | Step-by-step Gmail connector setup |
 | `MCP_QUICKSTART.md` | MCP quick reference and examples |
-| `.claude/skills/email-replies/SKILL.md` | Skill: draft replies to unread emails |
-| `.claude/commands/reply.md` | `/reply` command: draft a single reply |
+| `skills/email-replies/SKILL.md` | Skill: draft replies to unread emails (copy to participant's `.claude/skills/email-replies/SKILL.md` during install) |
+| `commands/reply.md` | `/reply` command: draft a single reply (copy to participant's `.claude/commands/reply.md` during install) |

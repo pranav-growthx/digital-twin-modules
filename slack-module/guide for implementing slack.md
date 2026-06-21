@@ -28,6 +28,8 @@ user already has a terminal twin -- a Node file with a `core.js` that exports
 - **Attention gating** -- when two humans are talking in a thread without
   @mentioning the bot, it goes dormant. @mention to wake it.
 - **Thread commands** -- `!cancel`, `!reset`, `!status` for thread management.
+- **Outbound via MCP** -- the `slack-mcp.js` MCP server lets the agent send,
+  edit, delete, and list Slack messages as MCP tool calls.
 
 ---
 
@@ -41,11 +43,17 @@ user already has a terminal twin -- a Node file with a `core.js` that exports
 
 ---
 
-## Step 1 -- Copy `slack-bot.js` to the project root
+## Step 1 -- Copy files to the project root
 
-Copy `slack-bot.js` from this module's `node/` folder into the project **root**
-(next to `CLAUDE.md`). This is the canonical bot with:
+Copy from this module's `files/` folder into the project **root** (next to
+`CLAUDE.md`):
 
+- `files/slack-bot.js` -> `slack-bot.js` -- the inbound platform adapter
+- `files/slack-mcp.js` -> `slack-mcp.js` -- the outbound MCP server
+- `files/slack-actions.js` -> `slack-actions.js` -- CLI fallback (optional)
+- `files/.env.example` -> `.env.example` -- token template
+
+**`slack-bot.js`** is the canonical bot with:
 - ESM imports (`import`/`export`)
 - `askTwin()` import from `core.js` with fallback
 - Per-thread session UUIDs for Claude `--session` continuity
@@ -56,6 +64,12 @@ Copy `slack-bot.js` from this module's `node/` folder into the project **root**
 - Message chunking for Slack's ~4000 char limit
 - Auto-starts `scheduler.js` if present (cronjobs module integration)
 
+**`slack-mcp.js`** is a stdio MCP server exposing four tools:
+- `slack_send_message` -- post a message, returns the ts
+- `slack_edit_message` -- edit a bot-posted message
+- `slack_delete_message` -- delete a bot-posted message
+- `slack_list_messages` -- list recent messages in a channel
+
 If Step 0 found custom flags in the user's `core.js`, they're already handled
 since the bot calls `askTwin()` directly. If using the fallback path, merge
 any custom flags into the `spawnClaude()` function's `args` array.
@@ -64,10 +78,10 @@ any custom flags into the `spawnClaude()` function's `args` array.
 
 ## Step 2 -- Dependencies
 
-Add the two libraries the Slack face needs:
+Add the libraries the module needs:
 
 ```
-npm install @slack/bolt dotenv
+npm install @slack/bolt dotenv @modelcontextprotocol/sdk
 ```
 
 (If there's no `package.json`, create one with `npm init -y` and add
@@ -105,7 +119,31 @@ SLACK_APP_TOKEN=xapp-...
 
 ---
 
-## Step 4 -- Run & verify
+## Step 4 -- Configure MCP server
+
+Add the outbound MCP server to `.mcp.json` in the project root:
+
+```json
+{
+  "mcpServers": {
+    "slack-actions": {
+      "command": "node",
+      "args": ["slack-mcp.js"],
+      "env": {
+        "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+This gives the agent four MCP tools (`slack_send_message`, `slack_edit_message`,
+`slack_delete_message`, `slack_list_messages`) so it can act on Slack without
+shelling out.
+
+---
+
+## Step 5 -- Run & verify
 
 1. Confirm Claude Code is installed/logged in: `claude --version`. If it fails,
    tell the user to install/login first.
@@ -117,21 +155,14 @@ SLACK_APP_TOKEN=xapp-...
 
 ---
 
-## Step 5 -- Outbound actions: send / edit / delete messages
+## Step 6 (optional) -- CLI fallback skill
 
-The bot above *replies* to people. To also let the twin **send, edit, delete,
-and list** Slack messages on its own (e.g. "post 'standup in 5' to #general",
-"delete that last message"), install the actions CLI + a skill.
+If you want the twin to also have a CLI-based fallback for environments where
+MCP isn't available, copy the skill:
 
-**5a. Copy `slack-actions.js`** from this module's `node/` folder to the project
-root -- a CLI for `send` / `edit` / `delete` / `list`.
-
-**5b. Copy `.claude/skills/slack-message/SKILL.md`** from this module into the
-project's `.claude/skills/slack-message/` directory so the twin knows it has
-these powers and calls the CLI via Bash.
-
-**5c.** No new scopes needed: `chat:write` covers send/edit/delete of the bot's
-own messages; `*:history` covers `list` (both already added in Step 3).
+Copy `skills/slack-message/SKILL.md` from this module into the project's
+`.claude/skills/slack-message/` directory. This teaches the twin to call
+`slack-actions.js` via Bash for send/edit/delete/list.
 
 ---
 
@@ -148,5 +179,5 @@ own messages; `*:history` covers `list` (both already added in Step 3).
   installed / on PATH for the shell that launched the bot.
 
 When finished, give the user a 3-line summary: that the Slack bot was installed,
-that you added send/edit/delete via `slack-actions.js` + the `slack-message`
-skill, and the exact command to start the bot.
+that you added the MCP server for outbound actions (send/edit/delete/list), and
+the exact command to start the bot.

@@ -199,7 +199,7 @@ For projects that need reproducible MCP configurations, use a `.mcp.json` file i
 
 ## Creating Custom Skills
 
-Skills are instruction files that teach the agent how to orchestrate capabilities. They live in `.claude/skills/<name>/SKILL.md`.
+Skills are instruction files that teach the agent how to orchestrate capabilities. In this module repo they live under `skills/<name>/SKILL.md`, and during install they get copied into the participant's `.claude/skills/<name>/SKILL.md`.
 
 ### Anatomy of a Skill
 
@@ -320,6 +320,6 @@ claude -p "/reply Subject: Meeting tomorrow\nFrom: alice@example.com\nBody: Can 
 
 ### Skill Not Triggering
 
-- Verify the skill file is at `.claude/skills/<name>/SKILL.md`
+- Verify the skill file was copied to the participant's `.claude/skills/<name>/SKILL.md`
 - Check that the `description` field matches how you're phrasing your request
 - Try referencing the skill explicitly: "Use the email-replies skill to read my mail"

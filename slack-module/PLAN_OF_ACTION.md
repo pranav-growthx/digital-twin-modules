@@ -13,9 +13,9 @@ Work top to bottom. Don't skip steps. Each step has a done-check.
 ## Goal
 
 Turn the user's existing terminal twin into a **Slack bot, in place** -- same
-brain, new face. End state: one bot file, replies posting into Slack threads in
-the twin's voice, **plus** the twin can send / edit / delete Slack messages on
-its own (Step 7).
+brain, new face. End state: the bot replies in Slack threads in the twin's
+voice, **plus** the twin can send / edit / delete Slack messages on its own via
+an MCP server (or CLI fallback).
 
 ## Preconditions (verify first)
 
@@ -46,18 +46,20 @@ its own (Step 7).
 - Done when: you can list the exact flags the current twin passes (or confirm
   it uses the default `core.js` pattern).
 
-### 3. Copy the bot file
+### 3. Copy files from `files/` to project root
 
-- [ ] Copy `slack-bot.js` from this module's `node/` folder into the project
-      **root** (next to `CLAUDE.md`).
+- [ ] Copy `files/slack-bot.js` -> `slack-bot.js` (project root)
+- [ ] Copy `files/slack-mcp.js` -> `slack-mcp.js` (project root)
+- [ ] Copy `files/slack-actions.js` -> `slack-actions.js` (project root, CLI fallback)
+- [ ] Copy `files/.env.example` -> `.env.example` (project root)
 - [ ] If Step 2 found custom flags, merge them into the `spawnClaude()` function's
       `args` array so the Slack twin behaves identically.
 - [ ] Confirm `TWIN_DIR` resolves to the project root (where `CLAUDE.md` lives).
-- Done when: the bot file exists and its brain logic matches the user's twin.
+- Done when: all files exist and the bot's brain logic matches the user's twin.
 
 ### 4. Install dependencies
 
-- [ ] `npm install @slack/bolt dotenv`
+- [ ] `npm install @slack/bolt dotenv @modelcontextprotocol/sdk`
 - Done when: deps install without error.
 
 ### 5. Slack app + tokens (USER does this -- you can't)
@@ -67,8 +69,7 @@ its own (Step 7).
       subscriptions -> install -> bot token -> `/invite`).
 - [ ] Wait for the user to paste back `SLACK_BOT_TOKEN` (xoxb-) and
       `SLACK_APP_TOKEN` (xapp-).
-- [ ] Write them into `.env`; ensure `.env` is git-ignored.
-- Done when: `.env` has both tokens and is ignored by git.
+- Done when: the user has both tokens ready.
 
 ### 6. Create .env with tokens
 
@@ -76,17 +77,33 @@ its own (Step 7).
 - [ ] Ensure `.env` is in `.gitignore`.
 - Done when: `.env` exists with both tokens and won't be committed.
 
-### 7. Copy slack-actions.js and SKILL.md
+### 7. Add MCP server to `.mcp.json`
 
-- [ ] Copy `slack-actions.js` from this module's `node/` folder to the project root.
-- [ ] Copy `.claude/skills/slack-message/SKILL.md` into the project's
+- [ ] Create or update `.mcp.json` in the project root:
+  ```json
+  {
+    "mcpServers": {
+      "slack-actions": {
+        "command": "node",
+        "args": ["slack-mcp.js"],
+        "env": {
+          "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+        }
+      }
+    }
+  }
+  ```
+- Done when: `.mcp.json` exists with the slack-actions server configured.
+
+### 8. Optionally copy SKILL.md as fallback
+
+- [ ] Copy `skills/slack-message/SKILL.md` from this module into the project's
       `.claude/skills/slack-message/` directory (create it if needed).
-- [ ] No new scopes needed: `chat:write` covers send/edit/delete of the bot's own
-      messages; `*:history` covers `list` (both already added in Step 5).
-- Done when: `node slack-actions.js send <channel> "test"` posts a message and
-  prints its ts (and `delete`/`edit` work on it).
+- [ ] This is optional -- the MCP server is the primary way to act on Slack.
+      The skill is a CLI-based fallback for environments where MCP isn't available.
+- Done when: skill file copied (or skipped if not needed).
 
-### 8. Run & verify
+### 9. Run & verify
 
 - [ ] Start the bot from the project root (`node slack-bot.js`).
 - [ ] Confirm the startup log prints the bot identity + twin dir.
@@ -95,11 +112,11 @@ its own (Step 7).
       without a mention.
 - Done when: a real Slack message gets a correct in-voice reply.
 
-### 9. Report
+### 10. Report
 
 - [ ] Give the user a 3-line summary:
-  1. Slack bot installed -- bot file + actions CLI.
-  2. Send/edit/delete capability added via `slack-actions.js` + skill.
+  1. Slack bot installed -- bot file + MCP server for outbound actions.
+  2. MCP tools: `slack_send_message`, `slack_edit_message`, `slack_delete_message`, `slack_list_messages`.
   3. Start command: `node slack-bot.js`
 
 ---

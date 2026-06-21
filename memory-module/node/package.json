@@ -1,9 +1,0 @@
-{
-  "name": "twin-memory-module",
-  "type": "module",
-  "version": "1.0.0",
-  "description": "SQLite + FTS5 memory engine for digital twin",
-  "dependencies": {
-    "better-sqlite3": "^11.0.0"
-  }
-}

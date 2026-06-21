@@ -37,27 +37,41 @@ that exports `askTwin()`) gets a Slack front-end -- same brain, new face. People
 - **Attention gating.** When humans are talking to each other without @mentioning
   the bot, it goes dormant automatically. @mention to wake it.
 - **Thread commands.** `!cancel`, `!reset`, `!status` for thread management.
-- **Sends, edits & deletes too.** Beyond replying, the twin can post, edit,
-  delete, and list Slack messages on its own (via `slack-actions.js` + the
-  `slack-message` skill).
+- **MCP server for outbound actions.** The twin can send, edit, delete, and list
+  Slack messages via the `slack-mcp.js` MCP server -- no CLI needed.
+- **CLI fallback.** `slack-actions.js` is a standalone CLI for environments where
+  MCP isn't available.
 - **Node.js ESM.** Uses `import`/`export` and `"type": "module"`.
 
-## How it works
+## Architecture
+
+There are two separate pieces:
+
+**Inbound (slack-bot.js)** -- the platform adapter. Listens for Slack messages
+(mentions, DMs, thread replies), calls `askTwin()` from `core.js`, and posts
+the reply back into the thread. This is a long-running process, not an MCP
+server.
+
+**Outbound (slack-mcp.js)** -- the MCP server. Exposes `slack_send_message`,
+`slack_edit_message`, `slack_delete_message`, and `slack_list_messages` as MCP
+tools so the agent can act on Slack proactively (e.g. "post standup in 5 to
+#general"). Runs as a stdio MCP server launched by `.mcp.json`.
 
 ```
-Slack message -----> slack-bot.js -----> askTwin(message)  (from your core.js)
-   (mention/DM)          |                    |  calls claude -p with your CLAUDE.md
-                         |                    v
-Slack thread  <---- post reply <-------- twin's answer
+Inbound:
+  Slack message -----> slack-bot.js -----> askTwin(message)
+     (mention/DM)          |                    |  calls claude -p
+                           |                    v
+  Slack thread  <---- post reply <-------- twin's answer
+
+Outbound:
+  Agent -----> slack-mcp.js (MCP) -----> Slack API
+     (send/edit/delete/list)                |
+                                            v
+  Agent  <---- result (ts, messages) <---- Slack
 ```
 
-If `core.js` doesn't exist, the bot falls back to spawning `claude -p` directly
-with per-thread session UUIDs for conversation continuity.
-
-The bot is a thin bridge wrapped around your existing brain. Your twin's
-personality and knowledge come entirely from the `CLAUDE.md` + handbook files in
-your project -- this module adds no persona of its own. It's **neutral**: point
-it at any twin and it speaks in that twin's voice.
+Both use `SLACK_BOT_TOKEN` from `.env`.
 
 ## The fastest way to install it (recommended)
 
@@ -72,26 +86,42 @@ instruction block at the top of this file).
 
 ## Manual install
 
-1. Copy the reference bot files to your project root:
-   - [`node/slack-bot.js`](node/slack-bot.js) -> `slack-bot.js`
-   - [`node/slack-actions.js`](node/slack-actions.js) -> `slack-actions.js`
-   - [`.claude/skills/slack-message/SKILL.md`](.claude/skills/slack-message/SKILL.md)
-     -> `.claude/skills/slack-message/SKILL.md`
+1. Copy the files from `files/` to your project root:
+   - `files/slack-bot.js` -> `slack-bot.js`
+   - `files/slack-mcp.js` -> `slack-mcp.js`
+   - `files/slack-actions.js` -> `slack-actions.js` (optional CLI fallback)
+   - `files/.env.example` -> `.env.example`
 2. Create the Slack app and get two tokens -- see
    **[`SLACK_APP_SETUP.md`](SLACK_APP_SETUP.md)**.
-3. `cp node/.env.example .env` and paste your tokens in.
-4. Install deps and run: `npm install @slack/bolt dotenv && node slack-bot.js`
-5. In Slack, `@mention` the bot or DM it.
+3. `cp .env.example .env` and paste your tokens in.
+4. Install deps: `npm install @slack/bolt dotenv @modelcontextprotocol/sdk`
+5. Add the MCP server to `.mcp.json`:
+   ```json
+   {
+     "mcpServers": {
+       "slack-actions": {
+         "command": "node",
+         "args": ["slack-mcp.js"],
+         "env": {
+           "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}"
+         }
+       }
+     }
+   }
+   ```
+6. Start the bot: `node slack-bot.js`
+7. In Slack, `@mention` the bot or DM it.
 
 ## Files
 
-| Path                                       | What it is                                   |
-| ------------------------------------------ | -------------------------------------------- |
-| `PLAN_OF_ACTION.md`                        | Ordered execution checklist (Claude/Codex)   |
-| `guide for implementing slack.md`          | Paste-into-Claude guide -- Node.js twin      |
-| `SLACK_APP_SETUP.md`                       | One-time Slack app creation (scopes, tokens) |
-| `.claude/skills/slack-message/SKILL.md`    | Teaches the twin to send/edit/delete/list    |
-| `node/slack-bot.js`                        | Reference bot with state machine + gating    |
-| `node/slack-actions.js`                    | CLI for send/edit/delete/list                |
-| `node/package.json`                        | Dependencies (ESM, @slack/bolt, dotenv)      |
-| `node/.env.example`                        | Token template                               |
+| Path                                  | What it is                                   |
+| ------------------------------------- | -------------------------------------------- |
+| `PLAN_OF_ACTION.md`                   | Ordered execution checklist (Claude/Codex)   |
+| `guide for implementing slack.md`     | Paste-into-Claude guide -- Node.js twin      |
+| `SLACK_APP_SETUP.md`                  | One-time Slack app creation (scopes, tokens) |
+| `skills/slack-message/SKILL.md`       | CLI fallback skill for send/edit/delete/list |
+| `files/slack-bot.js`                  | Inbound: platform adapter (Socket Mode bot)  |
+| `files/slack-mcp.js`                  | Outbound: MCP server for send/edit/delete    |
+| `files/slack-actions.js`              | Outbound: standalone CLI fallback            |
+| `files/.env.example`                  | Token template                               |
+| `deps.txt`                            | npm dependencies to install                  |
