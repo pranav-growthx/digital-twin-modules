@@ -26,11 +26,11 @@ const __dirname = path.dirname(__filename);
 // ── Config ──────────────────────────────────────────────────────────────────
 
 // Where YOUR twin lives. claude -p runs here so it loads your CLAUDE.md,
-// PERSONA.md, handbook, and any skills. Defaults to parent of this module
-// (the user's project root). Override in .env.
+// PERSONA.md, .mcp.json, and any skills. Defaults to the directory where
+// this file lives (the project root, since PLAN_OF_ACTION copies it there).
 const TWIN_DIR = process.env.TWIN_DIR
   ? path.resolve(process.env.TWIN_DIR)
-  : path.resolve(__dirname, "..");
+  : __dirname;
 
 // How long to let one Claude turn run before giving up (ms).
 const CLAUDE_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 300_000);
