@@ -59,7 +59,6 @@ For each MCP server the user wants, run the appropriate `claude mcp add` command
 ## Step 4: Install Skills
 
 - [ ] Copy `skills/email-replies/SKILL.md` → participant's `.claude/skills/email-replies/SKILL.md` (if they want email capability)
-- [ ] Copy `commands/reply.md` → participant's `.claude/commands/reply.md` (if they want the `/reply` command)
 - [ ] Verify skills are recognized: check that they appear in the agent's available skills
 
 ---

@@ -291,9 +291,6 @@ claude -p "List all tables in the connected database and their row counts."
 ```bash
 # Test the email-replies skill
 claude -p "Read my unread emails and draft replies."
-
-# Test the /reply command
-claude -p "/reply Subject: Meeting tomorrow\nFrom: alice@example.com\nBody: Can we push our 2pm to 3pm?"
 ```
 
 ---
