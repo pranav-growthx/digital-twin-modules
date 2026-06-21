@@ -18,7 +18,6 @@ const { App } = pkg;
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,26 +38,18 @@ const CLAUDE_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS || 300_000);
 // Slack messages cap around 4000 chars; split below that to be safe.
 const SLACK_CHUNK = 3500;
 
-// ── Try to import askTwin from the user's core.js ───────────────────────────
-
-let userAskTwin = null;
-
-const corePath = path.join(TWIN_DIR, "core.js");
-if (existsSync(corePath)) {
-  try {
-    const core = await import(corePath);
-    if (typeof core.askTwin === "function") {
-      userAskTwin = core.askTwin;
-      console.log("[init] Loaded askTwin from core.js");
-    }
-  } catch (err) {
-    console.warn("[init] Could not import core.js:", err.message);
-  }
-}
-
-if (!userAskTwin) {
-  console.log("[init] No core.js askTwin found; using direct claude -p fallback");
-}
+// ── NOTE on askTwin ─────────────────────────────────────────────────────────
+//
+// We intentionally do NOT import askTwin from core.js here. The participant's
+// askTwin uses execSync("claude -p --session ...") which:
+//   1. Does NOT include --permission-mode bypassPermissions (so MCP tool calls
+//      hang with no terminal to approve them)
+//   2. Blocks the event loop (execSync), preventing concurrent message handling
+//
+// Instead we use spawnClaude() which has bypassPermissions, async spawn(),
+// per-thread sessions, timeout, and proper error handling.
+// The participant's core.js brain logic (persona, session) is still used
+// because claude -p runs in TWIN_DIR and loads their PERSONA.md/CLAUDE.md.
 
 // ── Per-thread session state ────────────────────────────────────────────────
 //
@@ -152,16 +143,10 @@ function gateAttention(threadId, userId, mentionsBot, isSelfBot) {
 // ── Dispatch one message to the twin ────────────────────────────────────────
 
 /**
- * Ask the twin a question. Uses askTwin from core.js if available,
- * otherwise falls back to spawning claude -p directly.
+ * Ask the twin a question by spawning claude -p with per-thread sessions,
+ * bypassPermissions (so MCP tools work unattended), and timeout.
  */
 async function dispatchToTwin(threadId, message) {
-  if (userAskTwin) {
-    // core.js askTwin handles its own session/dispatch
-    return await userAskTwin(message);
-  }
-
-  // Fallback: spawn claude -p with per-thread session
   return spawnClaude(threadId, message);
 }
 
