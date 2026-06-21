@@ -1,0 +1,8 @@
+{
+  "name": "twin-scheduler-module",
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "dotenv": "^16.4.0"
+  }
+}
